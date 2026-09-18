@@ -1,24 +1,70 @@
 # Payment Architecture
 
-Milky Events is powered by Pyong Recordz Ltd.
+Milky Events uses organizer-owned payment collection.
 
-Primary collection account:
-- Account: PyongCity
-- Airtel Merchant Code: 6942918
+## Customer ticket payments
+Customers pay the organizer through the payment method configured for the event. Milky Events does not custody organizer ticket revenue.
 
-## Structure
-payments/checkout, orders, transactions, pyongcity, adapter, webhooks, fees, refunds, settlements, reconciliation.
+Supported/configurable payment methods can include:
+- MTN Mobile Money
+- Airtel Money
+- Bank account
+- Additional providers when implemented
 
-The application uses a generic payment adapter boundary. Core ticketing/order logic must not depend on provider-specific implementation details.
+Provider implementations live directly under `payments/providers/`. No generic adapter is required for V1.
 
-Adapter contract:
-- initialize()
-- verify()
-- status()
-- webhook()
-- refund()
+## Payment flow
+Checkout -> Order -> Organizer's configured payment method -> Payment verification -> Transaction PAID -> Ticket issuance.
 
-Provider credentials/secrets must never be committed to the repository. Secrets belong in the deployment platform secret store.
+Ticket issuance must never depend only on client-side payment success. Payment must be verified and ticket issuance must be idempotent.
 
-Payment flow: Checkout -> Order -> PyongCity -> Generic Payment Adapter -> Verification -> Transaction PAID -> Ticket issuance.
-Webhook handling must be idempotent and financial states auditable.
+Core payment states:
+- PAYMENT_PENDING
+- PAYMENT_PAID
+- PAYMENT_FAILED
+- PAYMENT_EXPIRED
+
+## Organizer payment methods
+Organizers can add/configure payment methods with:
+- method/provider
+- account or merchant identifier
+- account name
+- verification status
+- active/inactive status
+- events using the method
+
+Secrets and provider credentials must never be committed to the repository or exposed in frontend code.
+
+## Milky Events platform fees
+Milky Events calculates platform fees owed by each organizer independently of customer ticket payments.
+
+Organizers pay accumulated platform fees to:
+
+**Airtel Money**
+- Number: 0700709940
+- Name: EDDIE BYAMUGISHA
+
+**Stanbic Bank**
+- Account: 9030017150749
+- Name: EDDIE BYAMUGISHA
+
+These accounts are for platform-fee payments only.
+
+Organizer fee payments must support:
+- amount due
+- payment reference
+- submitted_at
+- verification status
+- verified_at
+- payment history
+- outstanding balance
+
+No organizer ticket revenue is represented as a Milky Events payout or settlement in V1.
+
+## Financial integrity
+- Store money as integer UGX.
+- Validate amounts server-side.
+- Make provider callbacks idempotent.
+- Keep financial records auditable.
+- Never issue duplicate tickets for repeated callbacks.
+- Refund behavior depends on the payment provider and organizer arrangement.
