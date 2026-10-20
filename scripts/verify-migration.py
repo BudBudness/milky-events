@@ -52,7 +52,7 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
     rls_count = conn.execute("""
       SELECT count(*) FROM pg_tables
       WHERE schemaname = 'public' AND rowsecurity
-        AND tablename = ANY(%s)
+        AND tablename::text = ANY(%s)
     """, ([
       "profiles", "categories", "organizers", "venues", "organizer_payment_methods",
       "events", "ticket_types", "orders", "order_items", "transactions", "tickets",
