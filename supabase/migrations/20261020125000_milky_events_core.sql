@@ -420,7 +420,7 @@ begin
   if v_order_id is not null then
     if exists (
       select 1 from public.order_items oi
-      where oi.v_order_id = v_order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
+      where oi.order_id = v_order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
     ) then return v_order_id; end if;
     raise exception 'Idempotency key was reused with different order details';
   end if;
@@ -439,7 +439,7 @@ begin
   if v_order_id is not null then
     if exists (
       select 1 from public.order_items oi
-      where oi.v_order_id = v_order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
+      where oi.order_id = v_order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
     ) then return v_order_id; end if;
     raise exception 'Idempotency key was reused with different order details';
   end if;
@@ -482,7 +482,7 @@ begin
     p_idempotency_key, case when total_ugx = 0 then now() else null end)
   returning id into v_order_id;
 
-  insert into public.order_items (v_order_id, ticket_type_id, quantity, unit_price_ugx, subtotal_ugx)
+  insert into public.order_items (order_id, ticket_type_id, quantity, unit_price_ugx, subtotal_ugx)
   values (v_order_id, ticket_row.id, p_quantity, ticket_row.price_ugx, total_ugx)
   returning id into item_id;
 
@@ -502,9 +502,9 @@ begin
         fee_ugx := p_quantity * rule_row.fixed_amount_ugx;
       end if;
       if fee_ugx > 0 then
-        insert into public.platform_fees (organizer_id, event_id, v_order_id, fee_rule_id, amount_ugx)
+        insert into public.platform_fees (organizer_id, event_id, order_id, fee_rule_id, amount_ugx)
         values (event_row.organizer_id, event_row.id, v_order_id, rule_row.id, fee_ugx)
-        on conflict (v_order_id, fee_rule_id) do nothing;
+        on conflict (order_id, fee_rule_id) do nothing;
       end if;
     end if;
   end if;
