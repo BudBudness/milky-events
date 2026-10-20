@@ -489,8 +489,11 @@ begin
   if total_ugx = 0 then
     insert into public.tickets (order_item_id, event_id, user_id, ticket_type_id, unique_code, qr_payload)
     select item_id, event_row.id, buyer_id, ticket_row.id, code.value, code.value
-    from generate_series(1, p_quantity) as ticket_number
-    cross join lateral (select upper(encode(public.gen_random_bytes(8), 'hex')) as value) code;
+    from generate_series(1, p_quantity) as ticket_number(n)
+    cross join lateral (
+      select upper(encode(public.gen_random_bytes(8), 'hex')) as value
+      where ticket_number.n > 0
+    ) code;
 
     select * into rule_row from public.platform_fee_rules r
     where r.active and r.effective_from <= now() and (r.effective_to is null or r.effective_to > now())
@@ -661,8 +664,11 @@ begin
   loop
     insert into public.tickets (order_item_id, event_id, user_id, ticket_type_id, unique_code, qr_payload)
     select item_row.id, order_row.event_id, order_row.user_id, item_row.ticket_type_id, code.value, code.value
-    from generate_series(1, item_row.quantity) as ticket_number
-    cross join lateral (select upper(encode(public.gen_random_bytes(8), 'hex')) as value) code;
+    from generate_series(1, item_row.quantity) as ticket_number(n)
+    cross join lateral (
+      select upper(encode(public.gen_random_bytes(8), 'hex')) as value
+      where ticket_number.n > 0
+    ) code;
   end loop;
 
   select * into rule_row from public.platform_fee_rules r
