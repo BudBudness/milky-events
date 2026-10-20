@@ -570,7 +570,9 @@ begin
       raise exception 'Submitted transaction cannot be verified';
     end if;
     update public.transactions
-    set status = 'verified'::public.transaction_status, verified_at = now(),
+    set provider = trim(p_provider),
+        status = 'verified'::public.transaction_status,
+        verified_at = now(),
         verification_source = p_verification_source
     where id = transaction_row.id;
   else
