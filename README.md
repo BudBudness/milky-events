@@ -27,7 +27,7 @@ Mbarara-first event discovery and digital ticketing platform powered by Pyong Re
 4. Apply `supabase/migrations/20261020125000_milky_events_core.sql` to the intended Supabase project.
 5. Run `npm run dev`.
 
-The home page remains buildable without secrets for CI, but account and operational workflows require a configured Supabase project. Never expose `SUPABASE_SECRET_KEY` or `MILKY_INTERNAL_API_TOKEN` to the browser.
+The home page remains buildable without secrets for CI, but account and operational workflows require a configured Supabase project. Never expose `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, or `MILKY_INTERNAL_API_TOKEN` to the browser.
 
 ## Payment model
 
