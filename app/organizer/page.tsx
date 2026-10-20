@@ -34,7 +34,7 @@ export default async function OrganizerPage({ searchParams }: {
         <h2 style={{fontSize:25}}>Organizer workspace</h2>
         <p>Account: <strong>{organizer.name}</strong> · Approved</p>
         <p>Create an event with a ticket type. Paid events require a verified active payment destination.</p>
-        <div className="pills"><Link className="button" href="/organizer/events/new">Submit an event</Link><Link className="button" href="/organizer/payment-methods/new" style={{background:"var(--ink)"}}>Payment destinations</Link><Link className="button" href="/organizer/check-in" style={{background:"var(--ink)"}}>Ticket check-in</Link></div>
+        <div className="pills"><Link className="button" href="/organizer/events/new">Submit an event</Link><Link className="button" href="/organizer/payment-methods/new" style={{background:"var(--ink)"}}>Payment destinations</Link><Link className="button" href="/organizer/check-in" style={{background:"var(--ink)"}}>Ticket check-in</Link><Link className="button" href="/organizer/fees" style={{background:"var(--ink)"}}>Platform fees</Link></div>
         <p style={{fontSize:13,color:"var(--muted)",marginTop:18}}>Event publication requires internal review. Customer ticket payments go directly to your verified destination.</p>
       </> : organizer?.status === "pending" ? <>
         <div className="notice">Your organizer application is awaiting review. Event publishing tools unlock after approval.</div>
