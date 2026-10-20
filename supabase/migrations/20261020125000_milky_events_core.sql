@@ -400,7 +400,7 @@ declare
   organizer_row public.organizers%rowtype;
   method_row public.organizer_payment_methods%rowtype;
   rule_row public.platform_fee_rules%rowtype;
-  order_id uuid;
+  v_order_id uuid;
   item_id uuid;
   total_ugx bigint;
   fee_ugx bigint := 0;
@@ -414,14 +414,14 @@ begin
   end if;
   perform pg_advisory_xact_lock(hashtextextended(buyer_id::text || ':' || p_idempotency_key, 0));
 
-  select o.id into order_id
+  select o.id into v_order_id
   from public.orders o
   where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
-  if order_id is not null then
+  if v_order_id is not null then
     if exists (
       select 1 from public.order_items oi
-      where oi.order_id = order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
-    ) then return order_id; end if;
+      where oi.v_order_id = v_order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
+    ) then return v_order_id; end if;
     raise exception 'Idempotency key was reused with different order details';
   end if;
 
@@ -433,14 +433,14 @@ begin
 
   -- Re-check after locking inventory so concurrent retries with the same key
   -- return the first order instead of reserving inventory twice.
-  select o.id into order_id
+  select o.id into v_order_id
   from public.orders o
   where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
-  if order_id is not null then
+  if v_order_id is not null then
     if exists (
       select 1 from public.order_items oi
-      where oi.order_id = order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
-    ) then return order_id; end if;
+      where oi.v_order_id = v_order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
+    ) then return v_order_id; end if;
     raise exception 'Idempotency key was reused with different order details';
   end if;
 
@@ -480,10 +480,10 @@ begin
   values (buyer_id, event_row.id, total_ugx,
     case when total_ugx = 0 then 'paid'::public.order_status else 'payment_pending'::public.order_status end,
     p_idempotency_key, case when total_ugx = 0 then now() else null end)
-  returning id into order_id;
+  returning id into v_order_id;
 
-  insert into public.order_items (order_id, ticket_type_id, quantity, unit_price_ugx, subtotal_ugx)
-  values (order_id, ticket_row.id, p_quantity, ticket_row.price_ugx, total_ugx)
+  insert into public.order_items (v_order_id, ticket_type_id, quantity, unit_price_ugx, subtotal_ugx)
+  values (v_order_id, ticket_row.id, p_quantity, ticket_row.price_ugx, total_ugx)
   returning id into item_id;
 
   if total_ugx = 0 then
@@ -502,18 +502,18 @@ begin
         fee_ugx := p_quantity * rule_row.fixed_amount_ugx;
       end if;
       if fee_ugx > 0 then
-        insert into public.platform_fees (organizer_id, event_id, order_id, fee_rule_id, amount_ugx)
-        values (event_row.organizer_id, event_row.id, order_id, rule_row.id, fee_ugx)
-        on conflict (order_id, fee_rule_id) do nothing;
+        insert into public.platform_fees (organizer_id, event_id, v_order_id, fee_rule_id, amount_ugx)
+        values (event_row.organizer_id, event_row.id, v_order_id, rule_row.id, fee_ugx)
+        on conflict (v_order_id, fee_rule_id) do nothing;
       end if;
     end if;
   end if;
 
   insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
-  values (buyer_id, 'ticket_order_created', 'order', order_id::text,
+  values (buyer_id, 'ticket_order_created', 'order', v_order_id::text,
     jsonb_build_object('event_id', event_row.id, 'ticket_type_id', ticket_row.id, 'quantity', p_quantity, 'total_ugx', total_ugx));
 
-  return order_id;
+  return v_order_id;
 end;
 $$;
 
