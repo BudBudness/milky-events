@@ -23,6 +23,8 @@ jobs:
           node-version: "22"
       - name: Install dependencies
         run: npm install
+      - name: Verify database schema contract
+        run: npm run verify:schema
       - name: Typecheck
         run: npm run typecheck
       - name: Production build
