@@ -1028,3 +1028,102 @@ $$;
 
 revoke all on function public.expire_ticket_orders() from public, anon, authenticated;
 grant execute on function public.expire_ticket_orders() to service_role;
+
+
+-- Only one fee rule can be active at a time; rule changes are explicit and auditable.
+create unique index platform_fee_rules_single_active_idx
+  on public.platform_fee_rules (active) where active;
+
+create or replace function public.upsert_platform_fee_rule(
+  p_rule_id uuid,
+  p_name text,
+  p_percentage_bps integer,
+  p_fixed_amount_ugx bigint,
+  p_basis text,
+  p_free_event_policy text,
+  p_refund_policy text,
+  p_payable_rule text,
+  p_effective_from timestamptz,
+  p_effective_to timestamptz,
+  p_active boolean
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  rule_id uuid;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Fee rule management is restricted'; end if;
+  if p_name is null or char_length(trim(p_name)) not between 2 and 120 then raise exception 'Invalid fee rule name'; end if;
+  if p_percentage_bps is null or p_percentage_bps not between 0 and 10000 then raise exception 'Invalid percentage basis points'; end if;
+  if p_fixed_amount_ugx is null or p_fixed_amount_ugx < 0 then raise exception 'Invalid fixed fee'; end if;
+  if p_basis not in ('per_ticket', 'per_order') then raise exception 'Invalid fee basis'; end if;
+  if p_free_event_policy not in ('waived', 'fixed') then raise exception 'Invalid free-event policy'; end if;
+  if p_refund_policy is null or char_length(trim(p_refund_policy)) not between 2 and 120 then raise exception 'Invalid refund policy';
+  end if;
+  if p_payable_rule is null or char_length(trim(p_payable_rule)) not between 2 and 120 then raise exception 'Invalid payable rule';
+  end if;
+  if p_effective_from is null or (p_effective_to is not null and p_effective_to <= p_effective_from) then
+    raise exception 'Invalid effective dates';
+  end if;
+
+  if p_active then
+    update public.platform_fee_rules
+    set active = false
+    where active and (p_rule_id is null or id <> p_rule_id);
+  end if;
+
+  if p_rule_id is null then
+    insert into public.platform_fee_rules (
+      name, percentage_bps, fixed_amount_ugx, basis, free_event_policy,
+      refund_policy, payable_rule, active, effective_from, effective_to
+    ) values (
+      trim(p_name), p_percentage_bps, p_fixed_amount_ugx, p_basis::public.fee_basis,
+      p_free_event_policy::public.free_event_policy, trim(p_refund_policy),
+      trim(p_payable_rule), p_active, p_effective_from, p_effective_to
+    ) returning id into rule_id;
+  else
+    update public.platform_fee_rules
+    set name = trim(p_name), percentage_bps = p_percentage_bps,
+        fixed_amount_ugx = p_fixed_amount_ugx, basis = p_basis::public.fee_basis,
+        free_event_policy = p_free_event_policy::public.free_event_policy,
+        refund_policy = trim(p_refund_policy), payable_rule = trim(p_payable_rule),
+        active = p_active, effective_from = p_effective_from, effective_to = p_effective_to
+    where id = p_rule_id
+    returning id into rule_id;
+    if rule_id is null then raise exception 'Fee rule not found'; end if;
+  end if;
+
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, 'platform_fee_rule_upserted', 'platform_fee_rule', rule_id::text,
+    jsonb_build_object('name', trim(p_name), 'active', p_active, 'basis', p_basis,
+      'percentage_bps', p_percentage_bps, 'fixed_amount_ugx', p_fixed_amount_ugx));
+  return rule_id;
+end;
+$$;
+
+create or replace function public.set_category_active(p_category_id uuid, p_active boolean)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  category_id uuid;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Category management is restricted'; end if;
+  update public.categories set active = p_active where id = p_category_id returning id into category_id;
+  if category_id is null then raise exception 'Category not found'; end if;
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, case when p_active then 'category_activated' else 'category_deactivated' end,
+    'category', category_id::text, jsonb_build_object('active', p_active));
+  return category_id;
+end;
+$$;
+
+revoke all on function public.upsert_platform_fee_rule(uuid, text, integer, bigint, text, text, text, text, timestamptz, timestamptz, boolean) from public, anon, authenticated;
+revoke all on function public.set_category_active(uuid, boolean) from public, anon, authenticated;
+grant execute on function public.upsert_platform_fee_rule(uuid, text, integer, bigint, text, text, text, text, timestamptz, timestamptz, boolean) to service_role;
+grant execute on function public.set_category_active(uuid, boolean) to service_role;
