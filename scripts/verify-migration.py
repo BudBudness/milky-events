@@ -50,6 +50,15 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
 
     category_count = conn.execute("SELECT count(*) FROM public.categories WHERE active").fetchone()[0]
     assert category_count == 12, f"Expected 12 active categories, got {category_count}"
+    technology_category = conn.execute("SELECT id FROM public.categories WHERE slug = 'technology'").fetchone()[0]
+    with conn.transaction():
+        claim(conn, "service_role")
+        conn.execute("SELECT public.set_category_active(%s, false)", (technology_category,))
+    assert conn.execute("SELECT active FROM public.categories WHERE id = %s", (technology_category,)).fetchone()[0] is False
+    with conn.transaction():
+        claim(conn, "service_role")
+        conn.execute("SELECT public.set_category_active(%s, true)", (technology_category,))
+    assert conn.execute("SELECT active FROM public.categories WHERE id = %s", (technology_category,)).fetchone()[0] is True
     rls_count = conn.execute("""
       SELECT count(*) FROM pg_tables
       WHERE schemaname = 'public' AND rowsecurity
@@ -106,12 +115,15 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         claim(conn, "service_role")
         conn.execute("SELECT public.review_event_submission(%s, true, 'CI publication')", (event_id,))
     ticket_type_id = conn.execute("SELECT id FROM public.ticket_types WHERE event_id = %s", (event_id,)).fetchone()[0]
-    fee_rule_id = str(uuid4())
-    conn.execute("""
-      INSERT INTO public.platform_fee_rules
-        (id, name, percentage_bps, fixed_amount_ugx, basis, free_event_policy, active, effective_from)
-      VALUES (%s, 'CI test rule', 500, 1000, 'per_order', 'waived', true, now())
-    """, (fee_rule_id,))
+    with conn.transaction():
+        claim(conn, "service_role")
+        fee_rule_id = conn.execute("""
+          SELECT public.upsert_platform_fee_rule(
+            NULL::uuid, 'CI test rule', 500, 1000, 'per_order', 'waived',
+            'reverse_on_full_refund', 'after_ticket_sale',
+            now() - interval '1 hour', NULL::timestamptz, true
+          )
+        """).fetchone()[0]
 
     # Public discovery is available; private financial records are not granted to anon.
     with conn.transaction():
