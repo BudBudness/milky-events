@@ -106,6 +106,12 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         claim(conn, "service_role")
         conn.execute("SELECT public.review_event_submission(%s, true, 'CI publication')", (event_id,))
     ticket_type_id = conn.execute("SELECT id FROM public.ticket_types WHERE event_id = %s", (event_id,)).fetchone()[0]
+    fee_rule_id = str(uuid4())
+    conn.execute("""
+      INSERT INTO public.platform_fee_rules
+        (id, name, percentage_bps, fixed_amount_ugx, basis, free_event_policy, active, effective_from)
+      VALUES (%s, 'CI test rule', 500, 1000, 'per_order', 'waived', true, now())
+    """, (fee_rule_id,))
 
     # Public discovery is available; private financial records are not granted to anon.
     with conn.transaction():
@@ -154,6 +160,34 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         )
     assert conn.execute("SELECT status FROM public.orders WHERE id = %s", (order_id,)).fetchone()[0] == "paid"
     assert conn.execute("SELECT count(*) FROM public.tickets WHERE order_item_id IN (SELECT id FROM public.order_items WHERE order_id = %s)", (order_id,)).fetchone()[0] == 2
+    fee_row = conn.execute("SELECT id, amount_ugx FROM public.platform_fees WHERE order_id = %s", (order_id,)).fetchone()
+    assert fee_row is not None and fee_row[1] == 2000, f"Unexpected platform fee calculation: {fee_row}"
+
+    fee_payment_id = str(uuid4())
+    conn.execute("""
+      INSERT INTO public.platform_fee_payments
+        (id, organizer_id, amount_ugx, payment_method, payment_reference, status)
+      VALUES (%s, %s, 2000, 'airtel_money', 'CI-FEE-REF-0001', 'pending')
+    """, (fee_payment_id, organizer_id))
+    with conn.transaction():
+        claim(conn, "service_role")
+        conn.execute("SELECT public.review_platform_fee_payment(%s, true, 'CI fee settlement')", (fee_payment_id,))
+    assert conn.execute("SELECT status FROM public.platform_fees WHERE id = %s", (fee_row[0],)).fetchone()[0] == "paid"
+
+    overpay_fee_id = str(uuid4())
+    conn.execute("""
+      INSERT INTO public.platform_fee_payments
+        (id, organizer_id, amount_ugx, payment_method, payment_reference, status)
+      VALUES (%s, %s, 1, 'airtel_money', 'CI-FEE-OVERPAY', 'pending')
+    """, (overpay_fee_id, organizer_id))
+    try:
+        with conn.transaction():
+            claim(conn, "service_role")
+            conn.execute("SELECT public.review_platform_fee_payment(%s, true, 'should fail')", (overpay_fee_id,))
+        raise AssertionError("Platform-fee overpayment was accepted")
+    except errors.RaiseException as exc:
+        assert "exceed assessed fees" in str(exc)
+    assert conn.execute("SELECT status FROM public.platform_fee_payments WHERE id = %s", (overpay_fee_id,)).fetchone()[0] == "pending"
 
     ticket_code = conn.execute("SELECT unique_code FROM public.tickets WHERE order_item_id IN (SELECT id FROM public.order_items WHERE order_id = %s) LIMIT 1", (order_id,)).fetchone()[0]
     # Only the organizer owning the event can check in; each ticket is accepted once.
@@ -188,9 +222,14 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
     except errors.RaiseException as exc:
         assert "does not match" in str(exc)
 
+    assert conn.execute("SELECT count(*) FROM public.tickets WHERE order_item_id IN (SELECT id FROM public.order_items WHERE order_id = %s)", (mismatch_order,)).fetchone()[0] == 0
+    conn.execute("UPDATE public.orders SET expires_at = now() - interval '1 minute' WHERE id = %s", (mismatch_order,))
     with conn.transaction():
-        claim(conn, "authenticated", buyer_id)
-        conn.execute("SELECT public.cancel_ticket_order(%s)", (mismatch_order,))
+        claim(conn, "service_role")
+        expired_count = conn.execute("SELECT public.expire_ticket_orders()").fetchone()[0]
+        assert expired_count == 1
+    assert conn.execute("SELECT status FROM public.orders WHERE id = %s", (mismatch_order,)).fetchone()[0] == "expired"
+    assert conn.execute("SELECT sold_quantity FROM public.ticket_types WHERE id = %s", (ticket_type_id,)).fetchone()[0] == 2
 
     # New-user trigger must not allow user metadata to elevate a public role.
     elevated_user_id = str(uuid4())
