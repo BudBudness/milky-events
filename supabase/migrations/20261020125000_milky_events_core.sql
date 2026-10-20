@@ -392,6 +392,13 @@ begin
   for update;
   if not found then raise exception 'Ticket type not found or inactive'; end if;
 
+  -- Re-check after locking inventory so concurrent retries with the same key
+  -- return the first order instead of reserving inventory twice.
+  select o.id into order_id
+  from public.orders o
+  where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
+  if order_id is not null then return order_id; end if;
+
   select * into event_row from public.events e where e.id = ticket_row.event_id;
   if not found or event_row.status <> 'published'::public.event_status or event_row.ends_at <= now() then
     raise exception 'Event is not available for booking';
@@ -646,12 +653,12 @@ begin
   for update;
   if not found then raise exception 'Ticket not found for this event'; end if;
   if ticket_row.status <> 'valid'::public.ticket_status then raise exception 'Ticket is already used or cancelled'; end if;
-  if not exists (select 1 from public.orders o where o.id = ticket_row.order_item_id and o.status = 'paid'::public.order_status) then
-    if not exists (select 1 from public.order_items oi join public.orders o on o.id = oi.order_id
-      where oi.id = ticket_row.order_item_id and o.status = 'paid'::public.order_status) then
-      raise exception 'Ticket order is not paid';
-    end if;
-  end if;
+  if not exists (
+    select 1 from public.order_items oi
+    join public.orders o on o.id = oi.order_id
+    where oi.id = ticket_row.order_item_id
+      and o.status = 'paid'::public.order_status
+  ) then raise exception 'Ticket order is not paid'; end if;
 
   update public.tickets set status = 'used'::public.ticket_status, checked_in_at = now() where id = ticket_row.id;
   insert into public.check_ins (ticket_id, event_id, checked_by, method)
