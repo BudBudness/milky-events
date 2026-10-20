@@ -82,7 +82,7 @@ export default async function Home() {
             const lowest = prices.length ? Math.min(...prices) : null;
             return <article className="event-card" key={event.id}>
               <span className="category">{event.categories?.name ?? "Local event"}</span>
-              <h3>{event.title}</h3><p>{event.description ?? "Event details will be shared by the organizer."}</p>
+              <h3>{event.title}</h3><p>{event.description ?? "Event details will be shared by the organizer."}</p><Link href={`/events/${event.id}`} style={{marginTop:14,fontWeight:700,color:"var(--green)"}}>View tickets →</Link>
               <div className="event-meta">{formatDate(event.starts_at)}<br/>{event.venues?.name ?? "Venue to be confirmed"}{event.venues?.area ? ` · ${event.venues.area}` : ""}<br/>{lowest === null ? "Tickets not listed" : lowest === 0 ? "Free entry" : `From UGX ${lowest.toLocaleString("en-UG")}`} · {available} available</div>
             </article>;
           }) : <div className="empty"><h3>No upcoming events published yet</h3><p>Check back soon, or list your next event on Milky Events.</p><Link className="button" href="/organizer">List an event</Link></div>}
