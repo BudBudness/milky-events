@@ -142,3 +142,36 @@ export async function submitEventWithTicket(formData: FormData) {
   revalidatePath("/");
   redirect(`/organizer?event_submitted=${eventId}`);
 }
+
+
+export async function addOrganizerPaymentMethod(formData: FormData) {
+  const supabase = await createClient();
+  if (!supabase) redirect("/?error=setup");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login?next=/organizer/payment-methods/new");
+  const method = String(formData.get("method") ?? "");
+  const provider = String(formData.get("provider") ?? "").trim();
+  const accountIdentifier = String(formData.get("account_identifier") ?? "").trim();
+  const accountName = String(formData.get("account_name") ?? "").trim();
+  const allowed = ["airtel_money", "mtn_momo", "bank_transfer", "card", "other"];
+  if (!allowed.includes(method) || provider.length < 2 || provider.length > 80 ||
+      accountIdentifier.length < 3 || accountIdentifier.length > 160 ||
+      accountName.length < 2 || accountName.length > 160) {
+    redirect("/organizer/payment-methods/new?error=invalid");
+  }
+
+  const { data: organizer } = await supabase.from("organizers").select("id").eq("user_id", user.id).maybeSingle();
+  if (!organizer) redirect("/organizer?error=application_required");
+  const { error } = await supabase.from("organizer_payment_methods").insert({
+    organizer_id: organizer.id,
+    method,
+    provider,
+    account_identifier: accountIdentifier,
+    account_name: accountName,
+    verification_status: "pending",
+    active: false,
+  });
+  if (error) redirect("/organizer/payment-methods/new?error=save");
+  revalidatePath("/organizer");
+  redirect("/organizer?payment_method_submitted=1");
+}
