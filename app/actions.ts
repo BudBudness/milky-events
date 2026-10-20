@@ -93,3 +93,52 @@ export async function cancelTicketOrder(formData: FormData) {
   revalidatePath(`/orders/${orderId}`);
   redirect(`/orders/${orderId}?cancelled=1`);
 }
+
+
+export async function submitEventWithTicket(formData: FormData) {
+  const supabase = await createClient();
+  if (!supabase) redirect("/?error=setup");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login?next=/organizer/events/new");
+
+  const title = String(formData.get("title") ?? "").trim();
+  const description = String(formData.get("description") ?? "").trim();
+  const categoryId = String(formData.get("category_id") ?? "");
+  const venueIdRaw = String(formData.get("venue_id") ?? "");
+  const paymentMethodIdRaw = String(formData.get("payment_method_id") ?? "");
+  const startsAtRaw = String(formData.get("starts_at") ?? "");
+  const endsAtRaw = String(formData.get("ends_at") ?? "");
+  const ticketName = String(formData.get("ticket_name") ?? "General admission").trim();
+  const price = Number(formData.get("price_ugx") ?? NaN);
+  const quantity = Number(formData.get("quantity") ?? NaN);
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const startsAt = new Date(startsAtRaw + ":00+03:00");
+  const endsAt = new Date(endsAtRaw + ":00+03:00");
+
+  if (title.length < 3 || title.length > 180 || !uuidPattern.test(categoryId) ||
+      (venueIdRaw && !uuidPattern.test(venueIdRaw)) ||
+      (paymentMethodIdRaw && !uuidPattern.test(paymentMethodIdRaw)) ||
+      !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) ||
+      startsAt.getTime() <= Date.now() || endsAt.getTime() <= startsAt.getTime() ||
+      ticketName.length < 1 || ticketName.length > 100 ||
+      !Number.isSafeInteger(price) || price < 0 ||
+      !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 100000) {
+    redirect("/organizer/events/new?error=invalid");
+  }
+
+  const { data: eventId, error } = await supabase.rpc("submit_event_with_ticket", {
+    p_category_id: categoryId,
+    p_title: title,
+    p_description: description || null,
+    p_venue_id: venueIdRaw || null,
+    p_payment_method_id: paymentMethodIdRaw || null,
+    p_starts_at: startsAt.toISOString(),
+    p_ends_at: endsAt.toISOString(),
+    p_ticket_name: ticketName,
+    p_price_ugx: price,
+    p_quantity: quantity,
+  });
+  if (error || !eventId) redirect("/organizer/events/new?error=submit_failed");
+  revalidatePath("/");
+  redirect(`/organizer?event_submitted=${eventId}`);
+}
