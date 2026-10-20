@@ -1,28 +1,40 @@
 # Milky Events
 
-Mbarara-first event discovery and digital ticketing platform.
+Mbarara-first event discovery and digital ticketing platform powered by Pyong Recordz Ltd.
 
-**Powered by Pyong Recordz Ltd.**
+## V1 product boundaries
 
-## V1
-- Event-goer and Organizer roles only.
-- Mbarara-first discovery.
-- 12 event categories.
-- Deterministic workflows.
-- QR ticketing and multi-method check-in.
-- Organizers configure and receive their own ticket payments.
-- Milky Events collects its platform fees separately from organizers.
-- Internal platform controls are not a public user role.
+- Public roles: Event-goer and Organizer only.
+- Internal platform operations are private and are not a public role.
+- Event discovery is mobile-first and starts in Mbarara.
+- Customer ticket payments go directly to organizers through verified organizer payment methods.
+- Milky Events calculates and tracks its platform fees separately; it does not custody customer ticket revenue.
+- QR ticketing, one-time server-side check-in, payment verification and fee reconciliation must be server-authoritative and idempotent.
+- No autonomous agents are part of the core transaction path.
+
+## Stack
+
+- Next.js App Router + TypeScript
+- Supabase Auth + PostgreSQL + RLS
+- GitHub Actions CI
+- Vercel deployment
+
+## Local development
+
+1. Use Node.js 22 or later.
+2. Install dependencies with `npm install`.
+3. Copy `.env.example` to `.env.local` and configure the Supabase URL and publishable key.
+4. Apply `supabase/migrations/20261020125000_milky_events_core.sql` to the intended Supabase project.
+5. Run `npm run dev`.
+
+The home page remains buildable without secrets for CI, but account and operational workflows require a configured Supabase project. Never expose `SUPABASE_SECRET_KEY` or `MILKY_INTERNAL_API_TOKEN` to the browser.
 
 ## Payment model
-Customer ticket payments go directly to the organizer's configured payment method. Milky Events verifies the payment before issuing tickets.
 
-Organizers pay accumulated Milky Events platform fees separately:
-- Airtel Money: 0700709940
-- Stanbic Bank: 9030017150749
-- Account name: EDDIE BYAMUGISHA
+Customer ticket payments are sent to an organizer's verified payment destination. A ticket must not be issued from client-side payment success alone. Provider callbacks or authorized manual-reference verification must validate the amount, order, reference and current state before ticket issuance. Duplicate references and repeated callbacks must not create duplicate tickets.
 
-These accounts are for Milky Events platform fees only, not customer ticket payments.
+Organizer platform fees are paid separately to Milky Events. The payment destinations documented in `docs/BASE44.md` are for platform fees only, never customer ticket payments.
 
-## Architecture
-Folders/modules/workflows are authoritative. No autonomous agents are part of the core execution path.
+## Release status
+
+The Next.js discovery, account, organizer application, event submission, ticket reservation, payment-reference, organizer check-in and platform-fee ledger flows are implemented in source. PostgreSQL functions handle inventory reservations, idempotency, trusted payment verification, ticket issuance, one-time check-in, organizer/event/payment review and expiry. CI applies the migration to an isolated PostgreSQL instance and tests these workflows. This is not yet a production release: the migration has not been applied to a dedicated Milky Events Supabase project, live RLS must be verified there, refund/offline check-in workflows remain incomplete, production secrets must be configured, and Vercel deployment/health checks must pass.
