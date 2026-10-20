@@ -315,10 +315,36 @@ create policy "Published event payment details are public" on public.organizer_p
 
 create policy "Published events and owner events are readable" on public.events for select to anon, authenticated using (status = 'published'::public.event_status or exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid())));
 create policy "Approved organizers submit events" on public.events for insert to authenticated with check (status = 'pending_approval'::public.event_status and exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid()) and o.status = 'approved'::public.organizer_status));
-create policy "Owners edit unapproved events" on public.events for update to authenticated using (exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid())) and status in ('draft'::public.event_status, 'pending_approval'::public.event_status)) with check (exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid())) and status in ('draft'::public.event_status, 'pending_approval'::public.event_status));
+create policy "Owners edit unapproved events" on public.events for update to authenticated
+using (
+  exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid()))
+  and status in ('draft'::public.event_status, 'pending_approval'::public.event_status)
+)
+with check (
+  exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid()))
+  and status in ('draft'::public.event_status, 'pending_approval'::public.event_status)
+  and (
+    payment_method_id is null
+    or exists (
+      select 1 from public.organizer_payment_methods pm
+      where pm.id = payment_method_id and pm.organizer_id = organizer_id
+        and pm.active and pm.verification_status = 'verified'::public.verification_status
+    )
+  )
+  and (
+    not exists (select 1 from public.ticket_types tt where tt.event_id = events.id and tt.active and tt.price_ugx > 0)
+    or exists (
+      select 1 from public.organizer_payment_methods pm
+      where pm.id = payment_method_id and pm.organizer_id = organizer_id
+        and pm.active and pm.verification_status = 'verified'::public.verification_status
+    )
+  )
+);
 
 create policy "Published ticket types are public" on public.ticket_types for select to anon, authenticated using (active and exists (select 1 from public.events e where e.id = event_id and e.status = 'published'::public.event_status));
-create policy "Event owners manage ticket types" on public.ticket_types for all to authenticated using (exists (select 1 from public.events e where e.id = event_id and private.owns_event(e.id))) with check (exists (select 1 from public.events e where e.id = event_id and private.owns_event(e.id)));
+create policy "Owners manage unapproved ticket types" on public.ticket_types for all to authenticated
+using (exists (select 1 from public.events e where e.id = event_id and private.owns_event(e.id) and e.status in ('draft'::public.event_status, 'pending_approval'::public.event_status)))
+with check (exists (select 1 from public.events e where e.id = event_id and private.owns_event(e.id) and e.status in ('draft'::public.event_status, 'pending_approval'::public.event_status)));
 
 create policy "Users read own orders" on public.orders for select to authenticated using (user_id = (select auth.uid()));
 create policy "Users read own order items" on public.order_items for select to authenticated using (exists (select 1 from public.orders o where o.id = order_id and o.user_id = (select auth.uid())));
@@ -333,7 +359,10 @@ grant usage on schema public to anon, authenticated;
 grant select on public.categories, public.events, public.ticket_types, public.organizers, public.organizer_payment_methods to anon, authenticated;
 grant select, update on public.profiles to authenticated;
 grant select, insert on public.organizers to authenticated;
-grant select, insert, update, delete on public.venues, public.organizer_payment_methods, public.events, public.ticket_types to authenticated;
+grant select, insert, update, delete on public.venues to authenticated;
+grant select, insert, update on public.organizer_payment_methods to authenticated;
+grant update (title, description, poster_url, category_id, venue_id, payment_method_id, starts_at, ends_at) on public.events to authenticated;
+grant update (name, description, price_ugx, quantity, active) on public.ticket_types to authenticated;
 grant select on public.orders, public.order_items, public.transactions, public.tickets, public.check_ins, public.platform_fees, public.platform_fee_payments to authenticated;
 grant insert on public.platform_fee_payments to authenticated;
 
@@ -399,10 +428,14 @@ begin
   where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
   if order_id is not null then return order_id; end if;
 
-  select * into event_row from public.events e where e.id = ticket_row.event_id;
+  select * into event_row from public.events e where e.id = ticket_row.event_id for update;
   if not found or event_row.status <> 'published'::public.event_status or event_row.ends_at <= now() then
     raise exception 'Event is not available for booking';
   end if;
+  if not exists (
+    select 1 from public.organizers o where o.id = event_row.organizer_id
+      and o.status = 'approved'::public.organizer_status
+  ) then raise exception 'Organizer is not approved for ticket sales'; end if;
 
   if event_row.payment_method_id is not null then
     select * into method_row
@@ -770,6 +803,12 @@ begin
   set status = case when p_approve then 'approved'::public.organizer_status else 'suspended'::public.organizer_status end,
       updated_at = now()
   where id = p_organizer_id;
+  if not p_approve then
+    update public.organizer_payment_methods set active = false, updated_at = now()
+    where organizer_id = p_organizer_id;
+    update public.events set status = 'cancelled'::public.event_status, updated_at = now()
+    where organizer_id = p_organizer_id and status in ('published'::public.event_status, 'pending_approval'::public.event_status);
+  end if;
   insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
   values (null, case when p_approve then 'organizer_approved' else 'organizer_suspended' end,
     'organizer', p_organizer_id::text, jsonb_build_object('reason', p_reason));
@@ -800,6 +839,13 @@ begin
     select 1 from public.organizers o where o.id = event_row.organizer_id
       and o.status = 'approved'::public.organizer_status
   ) then raise exception 'Organizer must be approved before publication'; end if;
+  if p_approve and exists (
+    select 1 from public.ticket_types tt where tt.event_id = event_row.id and tt.active and tt.price_ugx > 0
+  ) and not exists (
+    select 1 from public.organizer_payment_methods pm
+    where pm.id = event_row.payment_method_id and pm.organizer_id = event_row.organizer_id
+      and pm.active and pm.verification_status = 'verified'::public.verification_status
+  ) then raise exception 'Paid events require a verified active payment method'; end if;
   update public.events
   set status = case when p_approve then 'published'::public.event_status else 'rejected'::public.event_status end,
       rejection_reason = case when p_approve then null else nullif(trim(coalesce(p_reason, '')), '') end,
