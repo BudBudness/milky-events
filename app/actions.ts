@@ -175,3 +175,27 @@ export async function addOrganizerPaymentMethod(formData: FormData) {
   revalidatePath("/organizer");
   redirect("/organizer?payment_method_submitted=1");
 }
+
+
+export async function checkInTicket(formData: FormData) {
+  const supabase = await createClient();
+  if (!supabase) redirect("/?error=setup");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login?next=/organizer/check-in");
+  const eventId = String(formData.get("event_id") ?? "");
+  const code = String(formData.get("unique_code") ?? "").trim();
+  const method = String(formData.get("method") ?? "ticket_code");
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuidPattern.test(eventId) || code.length < 8 || code.length > 64 ||
+      !["qr", "ticket_code", "order_reference", "phone", "offline_sync"].includes(method)) {
+    redirect("/organizer/check-in?error=invalid");
+  }
+  const { error } = await supabase.rpc("check_in_ticket", {
+    p_unique_code: code,
+    p_event_id: eventId,
+    p_method: method,
+  });
+  if (error) redirect("/organizer/check-in?error=rejected");
+  revalidatePath("/organizer/check-in");
+  redirect("/organizer/check-in?checked_in=1");
+}
