@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import psycopg
@@ -70,32 +71,41 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
     category_id = conn.execute("SELECT id FROM public.categories WHERE slug = 'music-nightlife'").fetchone()[0]
     payment_method_id = str(uuid4())
     venue_id = str(uuid4())
-    event_id = str(uuid4())
-    ticket_type_id = str(uuid4())
 
     conn.execute("""
       INSERT INTO public.organizers (id, user_id, name, contact_phone, status)
-      VALUES (%s, %s, 'CI Test Organizer', '+256700000000', 'approved')
+      VALUES (%s, %s, 'CI Test Organizer', '+256700000000', 'pending')
     """, (organizer_id, organizer_user_id))
+    with conn.transaction():
+        claim(conn, "service_role")
+        conn.execute("SELECT public.review_organizer_application(%s, true, 'CI approval')", (organizer_id,))
+
     conn.execute("""
       INSERT INTO public.organizer_payment_methods
         (id, organizer_id, method, provider, account_identifier, account_name, verification_status, active)
-      VALUES (%s, %s, 'airtel_money', 'Airtel Money', '0700000000', 'CI Test Organizer', 'verified', true)
+      VALUES (%s, %s, 'airtel_money', 'Airtel Money', '0700000000', 'CI Test Organizer', 'pending', false)
     """, (payment_method_id, organizer_id))
+    with conn.transaction():
+        claim(conn, "service_role")
+        conn.execute("SELECT public.review_organizer_payment_method(%s, true, 'CI verification')", (payment_method_id,))
+
     conn.execute("""
       INSERT INTO public.venues (id, organizer_id, name, address, area)
       VALUES (%s, %s, 'CI Venue', 'Test address', 'Mbarara')
     """, (venue_id, organizer_id))
-    conn.execute("""
-      INSERT INTO public.events
-        (id, organizer_id, category_id, venue_id, payment_method_id, title, description, starts_at, ends_at, status, published_at)
-      VALUES (%s, %s, %s, %s, %s, 'CI Test Event', 'Temporary integration-test event',
-        now() + interval '1 day', now() + interval '2 days', 'published', now())
-    """, (event_id, organizer_id, category_id, venue_id, payment_method_id))
-    conn.execute("""
-      INSERT INTO public.ticket_types (id, event_id, name, price_ugx, quantity)
-      VALUES (%s, %s, 'General', 10000, 5)
-    """, (ticket_type_id, event_id))
+
+    starts_at = datetime.now(timezone.utc) + timedelta(days=1)
+    ends_at = datetime.now(timezone.utc) + timedelta(days=2)
+    with conn.transaction():
+        claim(conn, "authenticated", organizer_user_id)
+        event_id = conn.execute("""
+          SELECT public.submit_event_with_ticket(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (category_id, "CI Test Event", "Temporary integration-test event", venue_id,
+              payment_method_id, starts_at, ends_at, "General", 10000, 5)).fetchone()[0]
+    with conn.transaction():
+        claim(conn, "service_role")
+        conn.execute("SELECT public.review_event_submission(%s, true, 'CI publication')", (event_id,))
+    ticket_type_id = conn.execute("SELECT id FROM public.ticket_types WHERE event_id = %s", (event_id,)).fetchone()[0]
 
     # Public discovery is available; private financial records are not granted to anon.
     with conn.transaction():
