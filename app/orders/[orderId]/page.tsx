@@ -1,4 +1,5 @@
 import Link from "next/link";
+import TicketQr from "@/components/ticket-qr";
 import { notFound, redirect } from "next/navigation";
 import { cancelTicketOrder, submitPaymentReference } from "@/app/actions";
 import { createClient } from "@/lib/supabase/server";
@@ -60,7 +61,7 @@ export default async function OrderPage({ params, searchParams }: {
         <form action={cancelTicketOrder} style={{marginTop:16}}><input type="hidden" name="order_id" value={order.id}/><button type="submit" style={{background:"#6d756f"}}>Cancel pending order</button></form>
       </>}
       {transactions && transactions.length > 0 && <><h2 style={{fontSize:24,marginTop:30}}>Payment verification</h2>{transactions.map((transaction:any)=><div key={transaction.provider_reference} className="event-card" style={{minHeight:0,marginBottom:10}}><strong>{transaction.provider} · {transaction.provider_reference}</strong><p>{money(Number(transaction.amount_ugx))} · {transaction.status}</p></div>)}</>}
-      {order.status === "paid" && <><h2 style={{fontSize:24,marginTop:30}}>Your digital tickets</h2>{(tickets ?? []).map((ticket:any)=><div key={ticket.id} className="event-card" style={{minHeight:0,marginBottom:12}}><p className="eyebrow">Ticket code</p><h3>{ticket.unique_code}</h3><p>QR payload: <code>{ticket.qr_payload}</code></p><p>Status: {ticket.status}</p></div>)}<p style={{fontSize:13,color:"var(--muted)"}}>Keep these ticket codes private. Each ticket can be checked in once by an authorized organizer.</p></>}
+      {order.status === "paid" && <><h2 style={{fontSize:24,marginTop:30}}>Your digital tickets</h2>{(tickets ?? []).map((ticket:any)=><div key={ticket.id} className="event-card" style={{minHeight:0,marginBottom:12}}><p className="eyebrow">Ticket code</p><h3>{ticket.unique_code}</h3><TicketQr value={ticket.qr_payload}/><p>QR payload: <code>{ticket.qr_payload}</code></p><p>Status: {ticket.status}</p></div>)}<p style={{fontSize:13,color:"var(--muted)"}}>Keep these ticket codes private. Each ticket can be checked in once by an authorized organizer.</p></>}
     </section>
   </main>;
 }
