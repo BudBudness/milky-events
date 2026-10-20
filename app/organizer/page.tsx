@@ -5,7 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 export const dynamic = "force-dynamic";
 
 export default async function OrganizerPage({ searchParams }: {
-  searchParams: Promise<{ error?: string; submitted?: string; event_submitted?: string }>;
+  searchParams: Promise<{ error?: string; submitted?: string; event_submitted?: string; payment_method_submitted?: string }>;
 }) {
   const query = await searchParams;
   const supabase = await createClient();
@@ -28,13 +28,13 @@ export default async function OrganizerPage({ searchParams }: {
       {!supabase && <div className="notice">Supabase is not configured. Set the production environment variables before using organizer registration.</div>}
       {query.error && <div className="notice">We could not complete the request. Check the details or contact platform support.</div>}
       {query.submitted && <div className="notice">Your organizer application was submitted for review.</div>}
-      {query.event_submitted && <div className="notice">Your event and ticket type were submitted together for review. The event will not appear publicly until approved.</div>}
+      {query.event_submitted && <div className="notice">Your event and ticket type were submitted together for review. The event will not appear publicly until approved.</div>}{query.payment_method_submitted && <div className="notice">Your payment destination was submitted and is inactive until verified.</div>}
       {!signedIn ? <p>Sign in or create an event-goer account first, then submit your organizer application. <Link href="/login" style={{color:"var(--green)",fontWeight:700}}>Sign in →</Link></p>
       : organizer?.status === "approved" ? <>
         <h2 style={{fontSize:25}}>Organizer workspace</h2>
         <p>Account: <strong>{organizer.name}</strong> · Approved</p>
         <p>Create an event with a ticket type. Paid events require a verified active payment destination.</p>
-        <Link className="button" href="/organizer/events/new">Submit an event</Link>
+        <div className="pills"><Link className="button" href="/organizer/events/new">Submit an event</Link><Link className="button" href="/organizer/payment-methods/new" style={{background:"var(--ink)"}}>Payment destinations</Link><Link className="button" href="/organizer/check-in" style={{background:"var(--ink)"}}>Ticket check-in</Link></div>
         <p style={{fontSize:13,color:"var(--muted)",marginTop:18}}>Event publication requires internal review. Customer ticket payments go directly to your verified destination.</p>
       </> : organizer?.status === "pending" ? <>
         <div className="notice">Your organizer application is awaiting review. Event publishing tools unlock after approval.</div>
