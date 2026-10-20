@@ -29,7 +29,7 @@ export default async function OrganizerFeesPage({ searchParams }: { searchParams
     <section className="form-wrap">
       <p className="eyebrow">Platform fee ledger</p><h1 style={{fontSize:40}}>Organizer fees.</h1>
       <p className="lead" style={{fontSize:16}}>Platform fees are separate from customer ticket payments. Customers pay your verified destination; platform-fee payments go to Milky Events.</p>
-      <div className="event-grid" style={{gridTemplateColumns:"repeat(3,minmax(0,1fr))"}}>
+      <div className="notice">Pay platform fees only to Milky Events: <strong>Airtel Money 0700709940</strong> or <strong>Stanbic Bank 9030017150749</strong>, account name <strong>EDDIE BYAMUGISHA</strong>. These are platform-fee destinations, not customer ticket-payment destinations.</div><div className="event-grid" style={{gridTemplateColumns:"repeat(3,minmax(0,1fr))"}}>
         <div className="event-card" style={{minHeight:0}}><p className="eyebrow">Assessed</p><h2 style={{fontSize:24}}>{money(assessed)}</h2></div>
         <div className="event-card" style={{minHeight:0}}><p className="eyebrow">Verified payments</p><h2 style={{fontSize:24}}>{money(verified)}</h2></div>
         <div className="event-card" style={{minHeight:0}}><p className="eyebrow">Outstanding</p><h2 style={{fontSize:24}}>{money(outstanding)}</h2></div>
