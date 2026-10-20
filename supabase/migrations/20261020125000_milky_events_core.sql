@@ -304,7 +304,9 @@ create policy "Organizers read own profile" on public.organizers for select to a
 create policy "Organizers apply for themselves" on public.organizers for insert to authenticated with check (user_id = (select auth.uid()) and status = 'pending'::public.organizer_status);
 create policy "Public sees approved organizers" on public.organizers for select to anon, authenticated using (status = 'approved'::public.organizer_status);
 create policy "Owners read venues" on public.venues for select to authenticated using (private.owns_organizer(organizer_id));
-create policy "Approved organizers manage venues" on public.venues for all to authenticated using (private.owns_organizer(organizer_id)) with check (private.owns_organizer(organizer_id));
+create policy "Approved organizers manage venues" on public.venues for all to authenticated
+using (exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid()) and o.status = 'approved'::public.organizer_status))
+with check (exists (select 1 from public.organizers o where o.id = organizer_id and o.user_id = (select auth.uid()) and o.status = 'approved'::public.organizer_status));
 
 create policy "Owners read payment methods" on public.organizer_payment_methods for select to authenticated using (private.owns_organizer(organizer_id));
 create policy "Owners add payment methods" on public.organizer_payment_methods for insert to authenticated with check (private.owns_organizer(organizer_id) and verification_status = 'pending'::public.verification_status and active = false);
@@ -349,3 +351,322 @@ insert into public.categories (slug, name, description) values
 ('markets-shopping','Markets & Shopping','Markets, pop-ups and shopping experiences'),
 ('charity-causes','Charity & Causes','Fundraisers, volunteering and causes')
 on conflict (slug) do update set name = excluded.name, description = excluded.description, active = true;
+
+
+-- Reserve inventory atomically; a repeated idempotency key returns the original order.
+create or replace function public.create_ticket_order(
+  p_ticket_type_id uuid,
+  p_quantity integer,
+  p_idempotency_key text
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  buyer_id uuid := auth.uid();
+  ticket_row public.ticket_types%rowtype;
+  event_row public.events%rowtype;
+  method_row public.organizer_payment_methods%rowtype;
+  order_id uuid;
+  item_id uuid;
+  total_ugx bigint;
+begin
+  if buyer_id is null then raise exception 'Authentication required'; end if;
+  if p_quantity is null or p_quantity < 1 or p_quantity > 10 then
+    raise exception 'Quantity must be between 1 and 10';
+  end if;
+  if p_idempotency_key is null or char_length(p_idempotency_key) < 8 or char_length(p_idempotency_key) > 128 then
+    raise exception 'Invalid idempotency key';
+  end if;
+
+  select o.id into order_id
+  from public.orders o
+  where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
+  if order_id is not null then return order_id; end if;
+
+  select * into ticket_row
+  from public.ticket_types tt
+  where tt.id = p_ticket_type_id and tt.active
+  for update;
+  if not found then raise exception 'Ticket type not found or inactive'; end if;
+
+  select * into event_row from public.events e where e.id = ticket_row.event_id;
+  if not found or event_row.status <> 'published'::public.event_status or event_row.ends_at <= now() then
+    raise exception 'Event is not available for booking';
+  end if;
+
+  if event_row.payment_method_id is not null then
+    select * into method_row
+    from public.organizer_payment_methods pm
+    where pm.id = event_row.payment_method_id
+      and pm.organizer_id = event_row.organizer_id
+      and pm.active
+      and pm.verification_status = 'verified'::public.verification_status;
+  end if;
+
+  total_ugx := ticket_row.price_ugx * p_quantity;
+  if total_ugx > 0 and method_row.id is null then
+    raise exception 'Event has no verified active payment method';
+  end if;
+  if ticket_row.sold_quantity + p_quantity > ticket_row.quantity then
+    raise exception 'Insufficient ticket inventory';
+  end if;
+
+  update public.ticket_types
+  set sold_quantity = sold_quantity + p_quantity
+  where id = ticket_row.id;
+
+  insert into public.orders (user_id, event_id, total_amount_ugx, status, idempotency_key, paid_at)
+  values (buyer_id, event_row.id, total_ugx,
+    case when total_ugx = 0 then 'paid'::public.order_status else 'payment_pending'::public.order_status end,
+    p_idempotency_key, case when total_ugx = 0 then now() else null end)
+  returning id into order_id;
+
+  insert into public.order_items (order_id, ticket_type_id, quantity, unit_price_ugx, subtotal_ugx)
+  values (order_id, ticket_row.id, p_quantity, ticket_row.price_ugx, total_ugx)
+  returning id into item_id;
+
+  if total_ugx = 0 then
+    insert into public.tickets (order_item_id, event_id, user_id, ticket_type_id, unique_code, qr_payload)
+    select item_id, event_row.id, buyer_id, ticket_row.id,
+      upper(encode(gen_random_bytes(8), 'hex')), gen_random_uuid()::text
+    from generate_series(1, p_quantity);
+  end if;
+
+  return order_id;
+end;
+$$;
+
+create or replace function public.cancel_ticket_order(p_order_id uuid)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  buyer_id uuid := auth.uid();
+  order_row public.orders%rowtype;
+begin
+  if buyer_id is null then raise exception 'Authentication required'; end if;
+  select * into order_row from public.orders o
+  where o.id = p_order_id and o.user_id = buyer_id
+  for update;
+  if not found then raise exception 'Order not found'; end if;
+  if order_row.status = 'cancelled'::public.order_status then return order_row.id; end if;
+  if order_row.status <> 'payment_pending'::public.order_status then
+    raise exception 'Only pending orders can be cancelled';
+  end if;
+
+  update public.ticket_types tt
+  set sold_quantity = tt.sold_quantity - oi.quantity
+  from public.order_items oi
+  where oi.order_id = order_row.id and tt.id = oi.ticket_type_id;
+
+  update public.orders set status = 'cancelled'::public.order_status where id = order_row.id;
+  return order_row.id;
+end;
+$$;
+
+-- Customers submit references as pending. This never issues a ticket.
+create or replace function public.submit_payment_reference(
+  p_order_id uuid,
+  p_provider text,
+  p_provider_reference text,
+  p_amount_ugx bigint
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  buyer_id uuid := auth.uid();
+  order_row public.orders%rowtype;
+  transaction_id uuid;
+begin
+  if buyer_id is null then raise exception 'Authentication required'; end if;
+  if p_provider is null or char_length(trim(p_provider)) not between 2 and 80 then
+    raise exception 'Invalid payment provider';
+  end if;
+  if p_provider_reference is null or char_length(trim(p_provider_reference)) not between 4 and 160 then
+    raise exception 'Invalid payment reference';
+  end if;
+  if p_amount_ugx is null or p_amount_ugx < 0 then raise exception 'Invalid payment amount'; end if;
+
+  select * into order_row from public.orders o
+  where o.id = p_order_id and o.user_id = buyer_id
+  for update;
+  if not found or order_row.status <> 'payment_pending'::public.order_status or order_row.expires_at <= now() then
+    raise exception 'Order is not awaiting payment';
+  end if;
+
+  insert into public.transactions (order_id, provider, provider_reference, amount_ugx, status, verification_source)
+  values (order_row.id, trim(p_provider), trim(p_provider_reference), p_amount_ugx,
+          'pending'::public.transaction_status, 'MANUAL_REFERENCE')
+  returning id into transaction_id;
+  return transaction_id;
+end;
+$$;
+
+-- Only the trusted server-side service role can verify payments and issue tickets.
+create or replace function public.verify_ticket_order_payment(
+  p_order_id uuid,
+  p_provider text,
+  p_provider_reference text,
+  p_amount_ugx bigint,
+  p_verification_source text default 'MANUAL_REFERENCE'
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  order_row public.orders%rowtype;
+  transaction_row public.transactions%rowtype;
+  rule_row public.platform_fee_rules%rowtype;
+  fee_ugx bigint := 0;
+  item_row record;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then
+    raise exception 'Trusted payment verification is restricted';
+  end if;
+  if p_verification_source not in ('PROVIDER', 'MANUAL_REFERENCE') then
+    raise exception 'Invalid verification source';
+  end if;
+
+  select * into order_row from public.orders o where o.id = p_order_id for update;
+  if not found then raise exception 'Order not found'; end if;
+
+  if order_row.status = 'paid'::public.order_status then
+    if exists (select 1 from public.transactions t where t.order_id = order_row.id
+      and t.provider_reference = p_provider_reference and t.status = 'verified'::public.transaction_status) then
+      return order_row.id;
+    end if;
+    raise exception 'Order already paid';
+  end if;
+  if order_row.status <> 'payment_pending'::public.order_status or order_row.expires_at <= now() then
+    raise exception 'Order is not awaiting payment';
+  end if;
+  if p_amount_ugx <> order_row.total_amount_ugx then raise exception 'Payment amount does not match order total'; end if;
+  if p_provider_reference is null or char_length(trim(p_provider_reference)) < 4 then
+    raise exception 'Invalid provider reference';
+  end if;
+
+  select * into transaction_row from public.transactions t
+  where t.order_id = order_row.id and t.provider_reference = trim(p_provider_reference)
+  for update;
+  if found then
+    if transaction_row.status <> 'pending'::public.transaction_status or transaction_row.amount_ugx <> p_amount_ugx then
+      raise exception 'Submitted transaction cannot be verified';
+    end if;
+    update public.transactions
+    set status = 'verified'::public.transaction_status, verified_at = now(),
+        verification_source = p_verification_source
+    where id = transaction_row.id;
+  else
+    insert into public.transactions (order_id, provider, provider_reference, amount_ugx, status, verification_source, verified_at)
+    values (order_row.id, trim(p_provider), trim(p_provider_reference), p_amount_ugx,
+      'verified'::public.transaction_status, p_verification_source, now());
+  end if;
+
+  update public.orders set status = 'paid'::public.order_status, paid_at = now()
+  where id = order_row.id;
+
+  for item_row in
+    select oi.id, oi.ticket_type_id, oi.quantity
+    from public.order_items oi where oi.order_id = order_row.id
+  loop
+    insert into public.tickets (order_item_id, event_id, user_id, ticket_type_id, unique_code, qr_payload)
+    select item_row.id, order_row.event_id, order_row.user_id, item_row.ticket_type_id,
+      upper(encode(gen_random_bytes(8), 'hex')), gen_random_uuid()::text
+    from generate_series(1, item_row.quantity);
+  end loop;
+
+  select * into rule_row from public.platform_fee_rules r
+  where r.active and r.effective_from <= now() and (r.effective_to is null or r.effective_to > now())
+  order by r.effective_from desc limit 1;
+
+  if found then
+    if order_row.total_amount_ugx = 0 and rule_row.free_event_policy = 'waived'::public.free_event_policy then
+      fee_ugx := 0;
+    elsif rule_row.basis = 'per_order'::public.fee_basis then
+      fee_ugx := round(order_row.total_amount_ugx::numeric * rule_row.percentage_bps / 10000)::bigint + rule_row.fixed_amount_ugx;
+    else
+      select coalesce(sum(oi.quantity * (round(oi.unit_price_ugx::numeric * rule_row.percentage_bps / 10000)::bigint + rule_row.fixed_amount_ugx)), 0)
+      into fee_ugx
+      from public.order_items oi where oi.order_id = order_row.id;
+    end if;
+
+    if fee_ugx > 0 then
+      insert into public.platform_fees (organizer_id, event_id, order_id, fee_rule_id, amount_ugx)
+      select e.organizer_id, order_row.event_id, order_row.id, rule_row.id, fee_ugx
+      from public.events e where e.id = order_row.event_id
+      on conflict (order_id, fee_rule_id) do nothing;
+    end if;
+  end if;
+
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, 'ticket_order_payment_verified', 'order', order_row.id::text,
+    jsonb_build_object('provider', p_provider, 'reference', p_provider_reference, 'amount_ugx', p_amount_ugx));
+
+  return order_row.id;
+end;
+$$;
+
+create or replace function public.check_in_ticket(
+  p_unique_code text,
+  p_event_id uuid,
+  p_method text default 'qr'
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  operator_id uuid := auth.uid();
+  ticket_row public.tickets%rowtype;
+begin
+  if operator_id is null then raise exception 'Authentication required'; end if;
+  if p_method not in ('qr', 'ticket_code', 'order_reference', 'phone', 'offline_sync') then
+    raise exception 'Invalid check-in method';
+  end if;
+  if not exists (
+    select 1 from public.events e
+    join public.organizers o on o.id = e.organizer_id
+    where e.id = p_event_id and o.user_id = operator_id
+      and o.status = 'approved'::public.organizer_status
+  ) then raise exception 'Not authorized for this event'; end if;
+
+  select * into ticket_row from public.tickets t
+  where t.unique_code = p_unique_code and t.event_id = p_event_id
+  for update;
+  if not found then raise exception 'Ticket not found for this event'; end if;
+  if ticket_row.status <> 'valid'::public.ticket_status then raise exception 'Ticket is already used or cancelled'; end if;
+  if not exists (select 1 from public.orders o where o.id = ticket_row.order_item_id and o.status = 'paid'::public.order_status) then
+    if not exists (select 1 from public.order_items oi join public.orders o on o.id = oi.order_id
+      where oi.id = ticket_row.order_item_id and o.status = 'paid'::public.order_status) then
+      raise exception 'Ticket order is not paid';
+    end if;
+  end if;
+
+  update public.tickets set status = 'used'::public.ticket_status, checked_in_at = now() where id = ticket_row.id;
+  insert into public.check_ins (ticket_id, event_id, checked_by, method)
+  values (ticket_row.id, p_event_id, operator_id, p_method);
+  return ticket_row.id;
+end;
+$$;
+
+revoke all on function public.create_ticket_order(uuid, integer, text) from public, anon;
+revoke all on function public.cancel_ticket_order(uuid) from public, anon;
+revoke all on function public.submit_payment_reference(uuid, text, text, bigint) from public, anon;
+revoke all on function public.verify_ticket_order_payment(uuid, text, text, bigint, text) from public, anon, authenticated;
+revoke all on function public.check_in_ticket(text, uuid, text) from public, anon;
+grant execute on function public.create_ticket_order(uuid, integer, text) to authenticated;
+grant execute on function public.cancel_ticket_order(uuid) to authenticated;
+grant execute on function public.submit_payment_reference(uuid, text, text, bigint) to authenticated;
+grant execute on function public.verify_ticket_order_payment(uuid, text, text, bigint, text) to service_role;
+grant execute on function public.check_in_ticket(text, uuid, text) to authenticated;
