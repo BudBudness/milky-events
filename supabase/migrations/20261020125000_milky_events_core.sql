@@ -679,3 +679,216 @@ grant execute on function public.cancel_ticket_order(uuid) to authenticated;
 grant execute on function public.submit_payment_reference(uuid, text, text, bigint) to authenticated;
 grant execute on function public.verify_ticket_order_payment(uuid, text, text, bigint, text) to service_role;
 grant execute on function public.check_in_ticket(text, uuid, text) to authenticated;
+
+
+-- Event submission is transactional: no orphan event if ticket setup fails.
+create or replace function public.submit_event_with_ticket(
+  p_category_id uuid,
+  p_title text,
+  p_description text,
+  p_venue_id uuid,
+  p_payment_method_id uuid,
+  p_starts_at timestamptz,
+  p_ends_at timestamptz,
+  p_ticket_name text,
+  p_price_ugx bigint,
+  p_quantity integer
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  actor_id uuid := auth.uid();
+  organizer_row public.organizers%rowtype;
+  event_id uuid;
+begin
+  if actor_id is null then raise exception 'Authentication required'; end if;
+  select * into organizer_row from public.organizers o
+  where o.user_id = actor_id for update;
+  if not found or organizer_row.status <> 'approved'::public.organizer_status then
+    raise exception 'Approved organizer account required';
+  end if;
+  if p_title is null or char_length(trim(p_title)) not between 3 and 180 then raise exception 'Invalid event title'; end if;
+  if p_ticket_name is null or char_length(trim(p_ticket_name)) not between 1 and 100 then raise exception 'Invalid ticket name'; end if;
+  if p_starts_at is null or p_ends_at is null or p_starts_at <= now() or p_ends_at <= p_starts_at then
+    raise exception 'Event dates are invalid';
+  end if;
+  if p_price_ugx is null or p_price_ugx < 0 or p_quantity is null or p_quantity < 1 or p_quantity > 100000 then
+    raise exception 'Invalid ticket price or inventory';
+  end if;
+  if not exists (select 1 from public.categories c where c.id = p_category_id and c.active) then
+    raise exception 'Category is unavailable';
+  end if;
+  if p_venue_id is not null and not exists (
+    select 1 from public.venues v where v.id = p_venue_id and v.organizer_id = organizer_row.id
+  ) then raise exception 'Venue does not belong to this organizer'; end if;
+  if p_price_ugx > 0 and not exists (
+    select 1 from public.organizer_payment_methods pm
+    where pm.id = p_payment_method_id and pm.organizer_id = organizer_row.id
+      and pm.active and pm.verification_status = 'verified'::public.verification_status
+  ) then raise exception 'Paid events require a verified active payment method'; end if;
+
+  insert into public.events (
+    organizer_id, category_id, venue_id, payment_method_id, title, description,
+    starts_at, ends_at, status
+  ) values (
+    organizer_row.id, p_category_id, p_venue_id,
+    case when p_price_ugx > 0 then p_payment_method_id else null end,
+    trim(p_title), nullif(trim(coalesce(p_description, '')), ''),
+    p_starts_at, p_ends_at, 'pending_approval'::public.event_status
+  ) returning id into event_id;
+
+  insert into public.ticket_types (event_id, name, price_ugx, quantity)
+  values (event_id, trim(p_ticket_name), p_price_ugx, p_quantity);
+
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (actor_id, 'event_submitted', 'event', event_id::text,
+    jsonb_build_object('title', trim(p_title), 'ticket_price_ugx', p_price_ugx, 'quantity', p_quantity));
+  return event_id;
+end;
+$$;
+
+create or replace function public.review_organizer_application(
+  p_organizer_id uuid,
+  p_approve boolean,
+  p_reason text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  organizer_row public.organizers%rowtype;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Internal review is restricted'; end if;
+  select * into organizer_row from public.organizers o where o.id = p_organizer_id for update;
+  if not found then raise exception 'Organizer application not found'; end if;
+  update public.organizers
+  set status = case when p_approve then 'approved'::public.organizer_status else 'suspended'::public.organizer_status end,
+      updated_at = now()
+  where id = p_organizer_id;
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, case when p_approve then 'organizer_approved' else 'organizer_suspended' end,
+    'organizer', p_organizer_id::text, jsonb_build_object('reason', p_reason));
+  return p_organizer_id;
+end;
+$$;
+
+create or replace function public.review_event_submission(
+  p_event_id uuid,
+  p_approve boolean,
+  p_reason text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  event_row public.events%rowtype;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Internal review is restricted'; end if;
+  select * into event_row from public.events e where e.id = p_event_id for update;
+  if not found or event_row.status <> 'pending_approval'::public.event_status then
+    raise exception 'Event is not awaiting review';
+  end if;
+  update public.events
+  set status = case when p_approve then 'published'::public.event_status else 'rejected'::public.event_status end,
+      rejection_reason = case when p_approve then null else nullif(trim(coalesce(p_reason, '')), '') end,
+      published_at = case when p_approve then now() else null end,
+      updated_at = now()
+  where id = p_event_id;
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, case when p_approve then 'event_published' else 'event_rejected' end,
+    'event', p_event_id::text, jsonb_build_object('reason', p_reason));
+  return p_event_id;
+end;
+$$;
+
+create or replace function public.review_organizer_payment_method(
+  p_method_id uuid,
+  p_approve boolean,
+  p_reason text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  method_row public.organizer_payment_methods%rowtype;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Internal review is restricted'; end if;
+  select * into method_row from public.organizer_payment_methods pm where pm.id = p_method_id for update;
+  if not found then raise exception 'Payment method not found'; end if;
+  update public.organizer_payment_methods
+  set verification_status = case when p_approve then 'verified'::public.verification_status else 'rejected'::public.verification_status end,
+      active = p_approve,
+      updated_at = now()
+  where id = p_method_id;
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, case when p_approve then 'payment_method_verified' else 'payment_method_rejected' end,
+    'organizer_payment_method', p_method_id::text, jsonb_build_object('reason', p_reason));
+  return p_method_id;
+end;
+$$;
+
+create or replace function public.review_platform_fee_payment(
+  p_payment_id uuid,
+  p_approve boolean,
+  p_reason text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  payment_row public.platform_fee_payments%rowtype;
+  total_fees bigint;
+  total_verified bigint;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Internal review is restricted'; end if;
+  select * into payment_row from public.platform_fee_payments p where p.id = p_payment_id for update;
+  if not found or payment_row.status <> 'pending'::public.fee_payment_status then
+    raise exception 'Platform fee payment is not pending';
+  end if;
+  update public.platform_fee_payments
+  set status = case when p_approve then 'verified'::public.fee_payment_status else 'rejected'::public.fee_payment_status end,
+      verified_at = case when p_approve then now() else null end
+  where id = p_payment_id;
+
+  if p_approve then
+    select coalesce(sum(f.amount_ugx), 0) into total_fees
+    from public.platform_fees f where f.organizer_id = payment_row.organizer_id and f.status <> 'reversed';
+    select coalesce(sum(p.amount_ugx), 0) into total_verified
+    from public.platform_fee_payments p where p.organizer_id = payment_row.organizer_id and p.status = 'verified';
+    update public.platform_fees
+    set status = case
+      when total_verified >= total_fees then 'paid'
+      when total_verified > 0 then 'partially_paid'
+      else 'outstanding'
+    end
+    where organizer_id = payment_row.organizer_id and status <> 'reversed';
+  end if;
+
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (null, case when p_approve then 'platform_fee_payment_verified' else 'platform_fee_payment_rejected' end,
+    'platform_fee_payment', p_payment_id::text, jsonb_build_object('reason', p_reason));
+  return p_payment_id;
+end;
+$$;
+
+revoke all on function public.submit_event_with_ticket(uuid, text, text, uuid, uuid, timestamptz, timestamptz, text, bigint, integer) from public, anon;
+revoke all on function public.review_organizer_application(uuid, boolean, text) from public, anon, authenticated;
+revoke all on function public.review_event_submission(uuid, boolean, text) from public, anon, authenticated;
+revoke all on function public.review_organizer_payment_method(uuid, boolean, text) from public, anon, authenticated;
+revoke all on function public.review_platform_fee_payment(uuid, boolean, text) from public, anon, authenticated;
+grant execute on function public.submit_event_with_ticket(uuid, text, text, uuid, uuid, timestamptz, timestamptz, text, bigint, integer) to authenticated;
+grant execute on function public.review_organizer_application(uuid, boolean, text) to service_role;
+grant execute on function public.review_event_submission(uuid, boolean, text) to service_role;
+grant execute on function public.review_organizer_payment_method(uuid, boolean, text) to service_role;
+grant execute on function public.review_platform_fee_payment(uuid, boolean, text) to service_role;
