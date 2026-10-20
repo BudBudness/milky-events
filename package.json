@@ -9,7 +9,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:schema": "node scripts/verify-schema.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "0.7.0",
