@@ -397,10 +397,13 @@ declare
   buyer_id uuid := auth.uid();
   ticket_row public.ticket_types%rowtype;
   event_row public.events%rowtype;
+  organizer_row public.organizers%rowtype;
   method_row public.organizer_payment_methods%rowtype;
+  rule_row public.platform_fee_rules%rowtype;
   order_id uuid;
   item_id uuid;
   total_ugx bigint;
+  fee_ugx bigint := 0;
 begin
   if buyer_id is null then raise exception 'Authentication required'; end if;
   if p_quantity is null or p_quantity < 1 or p_quantity > 10 then
@@ -409,11 +412,18 @@ begin
   if p_idempotency_key is null or char_length(p_idempotency_key) < 8 or char_length(p_idempotency_key) > 128 then
     raise exception 'Invalid idempotency key';
   end if;
+  perform pg_advisory_xact_lock(hashtextextended(buyer_id::text || ':' || p_idempotency_key, 0));
 
   select o.id into order_id
   from public.orders o
   where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
-  if order_id is not null then return order_id; end if;
+  if order_id is not null then
+    if exists (
+      select 1 from public.order_items oi
+      where oi.order_id = order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
+    ) then return order_id; end if;
+    raise exception 'Idempotency key was reused with different order details';
+  end if;
 
   select * into ticket_row
   from public.ticket_types tt
@@ -426,16 +436,23 @@ begin
   select o.id into order_id
   from public.orders o
   where o.user_id = buyer_id and o.idempotency_key = p_idempotency_key;
-  if order_id is not null then return order_id; end if;
+  if order_id is not null then
+    if exists (
+      select 1 from public.order_items oi
+      where oi.order_id = order_id and oi.ticket_type_id = p_ticket_type_id and oi.quantity = p_quantity
+    ) then return order_id; end if;
+    raise exception 'Idempotency key was reused with different order details';
+  end if;
 
-  select * into event_row from public.events e where e.id = ticket_row.event_id for update;
+  select * into event_row from public.events e where e.id = ticket_row.event_id;
   if not found or event_row.status <> 'published'::public.event_status or event_row.ends_at <= now() then
     raise exception 'Event is not available for booking';
   end if;
-  if not exists (
-    select 1 from public.organizers o where o.id = event_row.organizer_id
-      and o.status = 'approved'::public.organizer_status
-  ) then raise exception 'Organizer is not approved for ticket sales'; end if;
+  select * into organizer_row from public.organizers o
+  where o.id = event_row.organizer_id for share;
+  if not found or organizer_row.status <> 'approved'::public.organizer_status then
+    raise exception 'Organizer is not approved for ticket sales';
+  end if;
 
   if event_row.payment_method_id is not null then
     select * into method_row
@@ -443,7 +460,8 @@ begin
     where pm.id = event_row.payment_method_id
       and pm.organizer_id = event_row.organizer_id
       and pm.active
-      and pm.verification_status = 'verified'::public.verification_status;
+      and pm.verification_status = 'verified'::public.verification_status
+    for share;
   end if;
 
   total_ugx := ticket_row.price_ugx * p_quantity;
@@ -473,7 +491,27 @@ begin
     select item_id, event_row.id, buyer_id, ticket_row.id,
       upper(encode(public.gen_random_bytes(8), 'hex')), gen_random_uuid()::text
     from generate_series(1, p_quantity);
+
+    select * into rule_row from public.platform_fee_rules r
+    where r.active and r.effective_from <= now() and (r.effective_to is null or r.effective_to > now())
+    order by r.effective_from desc limit 1;
+    if found and rule_row.free_event_policy = 'fixed'::public.free_event_policy then
+      if rule_row.basis = 'per_order'::public.fee_basis then
+        fee_ugx := rule_row.fixed_amount_ugx;
+      else
+        fee_ugx := p_quantity * rule_row.fixed_amount_ugx;
+      end if;
+      if fee_ugx > 0 then
+        insert into public.platform_fees (organizer_id, event_id, order_id, fee_rule_id, amount_ugx)
+        values (event_row.organizer_id, event_row.id, order_id, rule_row.id, fee_ugx)
+        on conflict (order_id, fee_rule_id) do nothing;
+      end if;
+    end if;
   end if;
+
+  insert into public.audit_logs (actor_id, action, entity_type, entity_id, metadata)
+  values (buyer_id, 'ticket_order_created', 'order', order_id::text,
+    jsonb_build_object('event_id', event_row.id, 'ticket_type_id', ticket_row.id, 'quantity', p_quantity, 'total_ugx', total_ugx));
 
   return order_id;
 end;
