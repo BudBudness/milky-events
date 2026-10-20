@@ -795,6 +795,11 @@ begin
   if not found or event_row.status <> 'pending_approval'::public.event_status then
     raise exception 'Event is not awaiting review';
   end if;
+  if p_approve and event_row.ends_at <= now() then raise exception 'Past events cannot be published'; end if;
+  if p_approve and not exists (
+    select 1 from public.organizers o where o.id = event_row.organizer_id
+      and o.status = 'approved'::public.organizer_status
+  ) then raise exception 'Organizer must be approved before publication'; end if;
   update public.events
   set status = case when p_approve then 'published'::public.event_status else 'rejected'::public.event_status end,
       rejection_reason = case when p_approve then null else nullif(trim(coalesce(p_reason, '')), '') end,
@@ -824,6 +829,10 @@ begin
   if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then raise exception 'Internal review is restricted'; end if;
   select * into method_row from public.organizer_payment_methods pm where pm.id = p_method_id for update;
   if not found then raise exception 'Payment method not found'; end if;
+  if p_approve and not exists (
+    select 1 from public.organizers o where o.id = method_row.organizer_id
+      and o.status = 'approved'::public.organizer_status
+  ) then raise exception 'Organizer must be approved before payment verification'; end if;
   update public.organizer_payment_methods
   set verification_status = case when p_approve then 'verified'::public.verification_status else 'rejected'::public.verification_status end,
       active = p_approve,
@@ -866,6 +875,7 @@ begin
     from public.platform_fees f where f.organizer_id = payment_row.organizer_id and f.status <> 'reversed';
     select coalesce(sum(p.amount_ugx), 0) into total_verified
     from public.platform_fee_payments p where p.organizer_id = payment_row.organizer_id and p.status = 'verified';
+    if total_verified > total_fees then raise exception 'Verified fee payments exceed assessed fees'; end if;
     update public.platform_fees
     set status = case
       when total_verified >= total_fees then 'paid'
@@ -892,3 +902,39 @@ grant execute on function public.review_organizer_application(uuid, boolean, tex
 grant execute on function public.review_event_submission(uuid, boolean, text) to service_role;
 grant execute on function public.review_organizer_payment_method(uuid, boolean, text) to service_role;
 grant execute on function public.review_platform_fee_payment(uuid, boolean, text) to service_role;
+
+
+-- Expire abandoned pending orders and release inventory reservations atomically.
+create or replace function public.expire_ticket_orders()
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  order_row public.orders%rowtype;
+  expired_count integer := 0;
+begin
+  if coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then
+    raise exception 'Order expiry is restricted';
+  end if;
+
+  for order_row in
+    select * from public.orders o
+    where o.status = 'payment_pending'::public.order_status and o.expires_at <= now()
+    order by o.expires_at
+    for update skip locked
+  loop
+    update public.ticket_types tt
+    set sold_quantity = tt.sold_quantity - oi.quantity
+    from public.order_items oi
+    where oi.order_id = order_row.id and tt.id = oi.ticket_type_id;
+    update public.orders set status = 'expired'::public.order_status where id = order_row.id;
+    expired_count := expired_count + 1;
+  end loop;
+  return expired_count;
+end;
+$$;
+
+revoke all on function public.expire_ticket_orders() from public, anon, authenticated;
+grant execute on function public.expire_ticket_orders() to service_role;
