@@ -199,3 +199,31 @@ export async function checkInTicket(formData: FormData) {
   revalidatePath("/organizer/check-in");
   redirect("/organizer/check-in?checked_in=1");
 }
+
+
+export async function submitPlatformFeePayment(formData: FormData) {
+  const supabase = await createClient();
+  if (!supabase) redirect("/?error=setup");
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login?next=/organizer/fees");
+  const method = String(formData.get("payment_method") ?? "");
+  const reference = String(formData.get("payment_reference") ?? "").trim();
+  const amount = Number(formData.get("amount_ugx") ?? NaN);
+  if (!["airtel_money", "bank_transfer", "other"].includes(method) ||
+      reference.length < 4 || reference.length > 160 ||
+      !Number.isSafeInteger(amount) || amount <= 0) {
+    redirect("/organizer/fees?error=invalid");
+  }
+  const { data: organizer } = await supabase.from("organizers").select("id").eq("user_id", user.id).maybeSingle();
+  if (!organizer) redirect("/organizer?error=application_required");
+  const { error } = await supabase.from("platform_fee_payments").insert({
+    organizer_id: organizer.id,
+    amount_ugx: amount,
+    payment_method: method,
+    payment_reference: reference,
+    status: "pending",
+  });
+  if (error) redirect("/organizer/fees?error=save");
+  revalidatePath("/organizer/fees");
+  redirect("/organizer/fees?submitted=1");
+}
