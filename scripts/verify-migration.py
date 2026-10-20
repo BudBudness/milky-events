@@ -160,6 +160,7 @@ with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         )
     assert conn.execute("SELECT status FROM public.orders WHERE id = %s", (order_id,)).fetchone()[0] == "paid"
     assert conn.execute("SELECT count(*) FROM public.tickets WHERE order_item_id IN (SELECT id FROM public.order_items WHERE order_id = %s)", (order_id,)).fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM public.tickets WHERE order_item_id IN (SELECT id FROM public.order_items WHERE order_id = %s) AND unique_code <> qr_payload", (order_id,)).fetchone()[0] == 0
     fee_row = conn.execute("SELECT id, amount_ugx FROM public.platform_fees WHERE order_id = %s", (order_id,)).fetchone()
     assert fee_row is not None and fee_row[1] == 2000, f"Unexpected platform fee calculation: {fee_row}"
 
