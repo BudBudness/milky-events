@@ -37,4 +37,4 @@ Organizer platform fees are paid separately to Milky Events. The payment destina
 
 ## Release status
 
-The initial Next.js discovery and organizer application UI, core schema and CI contract checks are in place. This is not yet a production release: the database migration must be applied to the intended project, checkout/payment verification/ticket issuance/check-in workflows must be implemented and tested, internal verification must be secured, and a Vercel production deployment must be smoke-tested.
+The Next.js discovery and organizer application UI, schema contract checks, atomic order reservation/cancellation, pending payment-reference submission, trusted payment verification, ticket issuance and one-time organizer check-in RPCs are implemented in source. This is not yet a production release: the migration has not been applied to a dedicated Milky Events Supabase project; these database functions must be tested against that live project; fee-payment reconciliation, refunds and offline check-in remain incomplete; internal secrets must be configured; and Vercel production deployment/health checks must pass.
