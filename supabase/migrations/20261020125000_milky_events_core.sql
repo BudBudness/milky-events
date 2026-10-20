@@ -438,7 +438,7 @@ begin
   if total_ugx = 0 then
     insert into public.tickets (order_item_id, event_id, user_id, ticket_type_id, unique_code, qr_payload)
     select item_id, event_row.id, buyer_id, ticket_row.id,
-      upper(encode(gen_random_bytes(8), 'hex')), gen_random_uuid()::text
+      upper(encode(public.gen_random_bytes(8), 'hex')), gen_random_uuid()::text
     from generate_series(1, p_quantity);
   end if;
 
@@ -590,7 +590,7 @@ begin
   loop
     insert into public.tickets (order_item_id, event_id, user_id, ticket_type_id, unique_code, qr_payload)
     select item_row.id, order_row.event_id, order_row.user_id, item_row.ticket_type_id,
-      upper(encode(gen_random_bytes(8), 'hex')), gen_random_uuid()::text
+      upper(encode(public.gen_random_bytes(8), 'hex')), gen_random_uuid()::text
     from generate_series(1, item_row.quantity);
   end loop;
 
